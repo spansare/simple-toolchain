@@ -28,6 +28,16 @@
             },
             "type": "string",
             "pattern": "\\S"
+        },
+        "api-key": {
+            "description": "The Bluemix API key is used to access the IBM Container Service API and interact with the cluster. You can obtain your API key with 'bx iam api-key-create' or via the console at https://console.ng.bluemix.net/iam/#/apikeys by clicking **Create API key** (Each API key only can be viewed once).",
+            "type": "string",
+            "pattern": "\\S"
+        },
+       "prod-cluster-name": {
+            "description": "Your cluster name. Retrieve it with [bx cs clusters] or via the console at https://console.ng.bluemix.net/containers-kubernetes/home/clusters .",
+            "type": "string",
+            "pattern": "\\S"
         }
     },
     "required": [
