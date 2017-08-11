@@ -115,8 +115,8 @@ stages:
       region_id: ${PROD_REGION_ID}
       organization: ${PROD_ORG_NAME}
       space: ${PROD_SPACE_NAME}
-      api_key: ${API_KEY}
-      kubernetes_cluster: ${PROD_CLUSTER_NAME}
+      api_key: 'GiZ-VvJ9ycZHevfCvPSLwH77c25zfeOUrD_mzMMocEmv'
+      kubernetes_cluster: 'mycluster'
     script: |
       #!/bin/bash
       #set -x
