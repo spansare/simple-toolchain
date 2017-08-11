@@ -4,58 +4,145 @@ stages:
   inputs:
   - type: git
     branch: master
-    service: ${SAMPLE_REPO}
+    service: ${GIT_REPO}    
   triggers:
   - type: commit
   jobs:
-  - name: Build
+  - name: Container build
     type: builder
+    extension_id: ibm.devops.services.pipeline.container.builder
+    target:
+      region_id: ${PROD_REGION_ID}
+      organization: ${PROD_ORG_NAME}
+      space: ${PROD_SPACE_NAME}
+    IMAGE_NAME: ${CF_APP_NAME}
+    USE_CACHED_LAYERS: 'true'
+    COMMAND: |
+      #!/bin/bash
+      # The following colors have been defined to help with presentation of logs: green, red, label_color, no_color.  
+      echo -e "${label_color}Starting build script${no_color}"
+      
+      # The IBM Container Service CLI (ice), Git client (git), IDS Inventory CLI (ids-inv) and Python 2.7.3 (python) have been installed.
+      # Based on the organization and space selected in the Job credentials are in place for both IBM Container Service and IBM Bluemix 
+      #####################
+      # Run unit tests    #
+      #####################
+      echo -e "${label_color}No unit tests cases have been checked in ${no_color}"
+      
+      ######################################
+      # Build Container via Dockerfile     #
+      ######################################
+      
+      # REGISTRY_URL=${CCS_REGISTRY_HOST}/${NAMESPACE}
+      # FULL_REPOSITORY_NAME=${REGISTRY_URL}/${IMAGE_NAME}:${APPLICATION_VERSION}   
+      
+      # Possible adding retries to build the image
+      if [ -f Dockerfile ]; then 
+          echo -e "${label_color}BUILDING ${FULL_REPOSITORY_NAME} ${no_color}"
+          ${EXT_DIR}/utilities/sendMessage.sh -l info -m "New container build requested for ${FULL_REPOSITORY_NAME}"
+          # build image
+          BUILD_COMMAND=""
+          if [ "${USE_CACHED_LAYERS}" == "true" ]; then 
+              BUILD_COMMAND="build --pull --tag ${FULL_REPOSITORY_NAME} ${WORKSPACE}"
+              ice_retry ${BUILD_COMMAND}
+              RESULT=$?
+          else 
+              BUILD_COMMAND="build --no-cache --tag ${FULL_REPOSITORY_NAME} ${WORKSPACE}"
+              ice_retry ${BUILD_COMMAND}
+              RESULT=$?
+          fi 
+      
+          if [ $RESULT -ne 0 ]; then
+              echo -e "${red}Error building image ${no_color}" | tee -a "$ERROR_LOG_FILE"
+              echo "Build command: ice ${BUILD_COMMAND}"
+              ice info 
+              ice images
+              ${EXT_DIR}/print_help.sh
+              ${EXT_DIR}/utilities/sendMessage.sh -l bad -m "Container build of ${FULL_REPOSITORY_NAME} failed"
+              exit 1
+          else
+              ${EXT_DIR}/utilities/sendMessage.sh -l good -m "Container build of ${FULL_REPOSITORY_NAME} was successful"
+              echo -e "${green}Container build of ${FULL_REPOSITORY_NAME} was successful ${no_color}"
+          fi  
+      else 
+          echo -e "${red}Dockerfile not found at the repository root${no_color}"
+          exit 1
+      fi  
+      
+      ######################################################################################
+      # Copy any artifacts that will be needed for deployment and testing to $WORKSPACE    #
+      ######################################################################################
+      echo "IMAGE_NAME=${FULL_REPOSITORY_NAME}" >> $ARCHIVE_DIR/build.properties
+      if [ -f deployment.yml ]; then
+          #Update deployment.yml with image name
+          echo "UPDATING DEPLOYMENT MANIFEST:"
+          sed -i "s~^\([[:blank:]]*\)image:.*$~\1image: ${FULL_REPOSITORY_NAME}~" deployment.yml
+          cat deployment.yml
+          cp deployment.yml $ARCHIVE_DIR/
+      else 
+          echo -e "${red}Kubernetes deployment file 'deployment.yml' not found at the repository root${no_color}"
+          exit 1
+      fi      
+- name: VALIDATE
+  inputs:
+  - type: job
+    stage: BUILD
+    job: Container build
+  triggers:
+  - type: stage
+  properties:
+  - name: FULL_REPOSITORY_NAME
+    value: ''
+    type: text  
+  jobs:
+  - name: Vulnerability Advisor
+    type: tester
+    extension_id: ibm.devops.services.pipeline.crawler.tester
+    target:
+      region_id: ${PROD_REGION_ID}
+      organization: ${PROD_ORG_NAME}
+      space: ${PROD_SPACE_NAME}
+    WAIT_TIME: '5'
 - name: DEPLOY
   inputs:
   - type: job
     stage: BUILD
-    job: Build
-  triggers:
-  - type: stage
-  properties:
-  - name: CF_APP_NAME
-    value: undefined
-    type: text
-  - name: APP_URL
-    value: undefined
-    type: text
+    job: Container build
   jobs:
-  - name: Blue-Green Deploy
+  - name: Deploy Kubernetes Pod
     type: deployer
     target:
       region_id: ${PROD_REGION_ID}
       organization: ${PROD_ORG_NAME}
       space: ${PROD_SPACE_NAME}
-      application: ${CF_APP_NAME}
+      api_key: ${API_KEY}
+      kubernetes_cluster: ${PROD_CLUSTER_NAME}
     script: |
       #!/bin/bash
-      # Push app
-      if ! cf app $CF_APP; then  
-        cf push $CF_APP
-      else
-        OLD_CF_APP=${CF_APP}-OLD-$(date +"%s")
-        rollback() {
-          set +e  
-          if cf app $OLD_CF_APP; then
-            cf logs $CF_APP --recent
-            cf delete $CF_APP -f
-            cf rename $OLD_CF_APP $CF_APP
-          fi
-          exit 1
-        }
-        set -e
-        trap rollback ERR
-        cf rename $CF_APP $OLD_CF_APP
-        cf push $CF_APP
-        cf delete $OLD_CF_APP -f
+      #set -x
+
+      #Check cluster availability
+      ip_addr=$(bx cs workers $PIPELINE_KUBERNETES_CLUSTER_NAME | grep normal | awk '{ print $2 }')
+      if [ -z $ip_addr ]; then
+        echo "$PIPELINE_KUBERNETES_CLUSTER_NAME not created or workers not ready"
+        exit 1
       fi
-      # Export app name and URL for use in later Pipeline jobs
-      export CF_APP_NAME="$CF_APP"
-      export APP_URL=http://$(cf app $CF_APP_NAME | grep urls: | awk '{print $2}')
-      # View logs
-      #cf logs "${CF_APP}" --recent
+
+      #Connect to a different container-service api by uncommenting and specifying an api endpoint
+      #bx cs init --host https://us-south.containers.bluemix.net
+      echo ""
+      echo "DEPLOYING USING MANIFEST:"
+      cat deployment.yml
+      kubectl apply -f deployment.yml  
+
+      echo ""
+      echo "DEPLOYED SERVICE:"
+      kubectl describe services hello-service
+
+      echo ""
+      echo "DEPLOYED PODS:"
+      kubectl describe pods --selector app=hello-app
+
+      port=$(kubectl get services | grep hello-service | sed 's/.*:\([0-9]*\).*/\1/g')
+      echo ""
+      echo "VIEW THE APPLICATION AT: http://$ip_addr:$port"
